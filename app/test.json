@@ -1,0 +1,12 @@
+[
+  {
+    "pgm_name": "Z_PERF_TEST",
+    "inc_name": "Z_PERF_TEST",
+    "type": "PROG",
+    "name": "MAIN",
+    "class_implementations": [],
+    "start_line": 100,
+    "end_line": 250,
+    "code": "LOOP AT lt_header INTO ls_header.\n  SELECT * FROM mara INTO TABLE lt_mara WHERE matnr = ls_header-matnr.\n  LOOP AT lt_mara INTO ls_mara.\n    WHILE sy-index < 5.\n      DO 3 TIMES.\n        WRITE: / ls_mara-matnr.\n      ENDDO.\n    ENDWHILE.\n  ENDLOOP.\nENDLOOP.\n\nSELECT * FROM marc FOR ALL ENTRIES IN lt_header WHERE matnr = lt_header-matnr."
+  }
+]

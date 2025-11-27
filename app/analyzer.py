@@ -23,6 +23,9 @@ SUGGEST_FOR_ALL_ENTRIES = "avoid select with for all entries , with relevant sel
 
 
 def strip_abab_line_comments(line: str) -> str:
+    """
+    Remove full-line '*' comments and strip trailing double-quote comments.
+    """
     if line.lstrip().startswith("*"):
         return ""
     quote_idx = line.find('"')
@@ -36,6 +39,12 @@ def normalize_newlines(text: str) -> str:
 
 
 def build_lines(code: str) -> List[Dict[str, Any]]:
+    """
+    Build per-line structures with:
+      - no: 1-based line number within the local code block
+      - raw: original line text
+      - clean: text after removing ABAP comments
+    """
     code = normalize_newlines(code or "")
     lines = code.split("\n")
     result = []
@@ -66,6 +75,10 @@ def is_loop_end(text: str) -> Optional[str]:
 
 
 def find_matching_end(lines: List[Dict[str, Any]], start_idx: int, block_type: str) -> Optional[int]:
+    """
+    Given a loop start at start_idx, find its matching ENDLOOP/ENDDO/ENDWHILE,
+    respecting nested blocks of the same type.
+    """
     depth = 1
     for i in range(start_idx + 1, len(lines)):
         clean = lines[i]["clean"]
@@ -81,6 +94,9 @@ def find_matching_end(lines: List[Dict[str, Any]], start_idx: int, block_type: s
 
 
 def collect_loop_blocks(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Collect all LOOP/DO/WHILE blocks with start and end indices.
+    """
     blocks = []
     stack: List[Tuple[str, int]] = []
     for idx, ld in enumerate(lines):
@@ -92,6 +108,7 @@ def collect_loop_blocks(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if start_type:
             stack.append((start_type, idx))
         elif end_type:
+            # pop back to matching start
             for s in range(len(stack) - 1, -1, -1):
                 t, sidx = stack[s]
                 if t == end_type:
@@ -105,8 +122,11 @@ def collect_loop_blocks(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def find_nested_loops(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Same core logic as original: detect nested LOOP/DO/WHILE.
-    Now we also record line number from inner_start_idx (metadata only).
+    Detect nested LOOP/DO/WHILE.
+    We keep:
+      - suggestion
+      - multi-line snippet (inner loop header and a few lines below)
+      - local line number where inner loop starts
     """
     findings = []
     stack: List[Tuple[str, int]] = []
@@ -121,12 +141,15 @@ def find_nested_loops(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if any(t in ("LOOP", "DO", "WHILE") for (t, _) in stack):
                 inner_start_idx = idx
                 inner_end_idx = find_matching_end(lines, inner_start_idx, stype)
-                snippet_lines = []
+
+                snippet_lines: List[str] = []
                 if inner_end_idx is not None:
+                    # capture inner block header + up to ~10 lines after, or until end
                     end_clip = min(inner_end_idx, inner_start_idx + 11)
                     for j in range(inner_start_idx, end_clip + 1):
                         snippet_lines.append(lines[j]["raw"])
                 else:
+                    # no matching end found; just take a few lines after
                     end_clip = min(len(lines) - 1, inner_start_idx + 5)
                     for j in range(inner_start_idx, end_clip + 1):
                         snippet_lines.append(lines[j]["raw"])
@@ -134,10 +157,13 @@ def find_nested_loops(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 findings.append({
                     "suggestion": SUGGEST_NESTED_LOOPS,
                     "snippet": "\n".join(snippet_lines).strip(),
-                    "line": lines[inner_start_idx]["no"],
+                    "line": lines[inner_start_idx]["no"],  # local line number
                 })
+
             stack.append((stype, idx))
+
         elif etype:
+            # pop to matching loop
             for s in range(len(stack) - 1, -1, -1):
                 t, _ = stack[s]
                 if t == etype:
@@ -148,8 +174,11 @@ def find_nested_loops(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def find_select_inside_loops(lines: List[Dict[str, Any]], loop_blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Same logic as original: detect SELECT inside any loop block.
-    Now we attach line number of SELECT line.
+    Detect SELECT inside any loop block.
+    For each SELECT line inside a loop, we capture:
+      - suggestion text
+      - 2-line snippet (loop header + select line)
+      - local line number of SELECT
     """
     findings = []
     for block in loop_blocks:
@@ -176,8 +205,11 @@ def find_select_inside_loops(lines: List[Dict[str, Any]], loop_blocks: List[Dict
 
 def find_for_all_entries(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Same logic: detect FOR ALL ENTRIES.
-    Now we also keep line number of the FOR ALL ENTRIES occurrence.
+    Detect FOR ALL ENTRIES patterns.
+    For each occurrence, we capture:
+      - suggestion
+      - 3-line snippet (previous, current, next)
+      - local line number of the FAE line
     """
     findings = []
     for i, ld in enumerate(lines):
@@ -197,11 +229,19 @@ def find_for_all_entries(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def analyze_item(item: Dict[str, Any]) -> Dict[str, Any]:
     """
     Core logic: unchanged detection, only response shape adapted
-    to the Credit Master 'final format' style.
+    to the Credit Master 'final format' style plus:
+      - absolute starting_line / ending_line using start_line offset
+      - severity forced to 'error'
+      - multiline snippet preserved as constructed above
     """
     code = item.get("code", "") or ""
     lines = build_lines(code)
 
+    # Base (absolute) start line of this code block in the original program
+    # If not provided, assume 1.
+    base_start_line = item.get("start_line") or 1
+
+    # Collect raw findings from the three rules
     raw_findings: List[Dict[str, Any]] = []
     raw_findings.extend(find_nested_loops(lines))
     loop_blocks = collect_loop_blocks(lines)
@@ -211,19 +251,24 @@ def analyze_item(item: Dict[str, Any]) -> Dict[str, Any]:
     # Build final-format response
     findings_final: List[Dict[str, Any]] = []
     for f in raw_findings:
-        line_no = f.get("line", 0) or 0
+        local_line_no = f.get("line", 0) or 0
+        if local_line_no > 0:
+            abs_line = base_start_line + local_line_no - 1
+        else:
+            abs_line = base_start_line
+
         findings_final.append({
             "prog_name": item.get("pgm_name"),
             "incl_name": item.get("inc_name"),
             "types": item.get("type"),
             "blockname": item.get("name"),
-            "starting_line": line_no,
-            "ending_line": line_no,
+            "starting_line": abs_line,
+            "ending_line": abs_line,
             "issues_type": "PerformanceIssue",          # fixed type label
-            "severity": "warning",                      # as per your pattern
+            "severity": "error",                        # ALWAYS error as per your requirement
             "message": f"Performance issue: {f['suggestion']}",
             "suggestion": f["suggestion"],
-            "snippet": f["snippet"],
+            "snippet": f["snippet"],                    # multiline snippet preserved
         })
 
     return {
